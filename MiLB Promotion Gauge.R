@@ -7,8 +7,23 @@ library(baseballr)
 
 # Data Collection
 Carson_McCusker_data <- fg_milb_batter_game_logs(playerid = "sa3022304", year = 2024)
-# Export Game Log CSV if wanted
+# Export Game Log CSV if wanted, example code:
 # write.csv(Carson_McCusker_data, "C:/Users/weber/OneDrive/Desktop/Baseball/Carson.McCusker.csv", row.names = FALSE)
+
+# Define scouting grade structure
+scouting_grades <- list(
+  "20" = 0,    # Well Below Average
+  "30" = 10,   # Below Average
+  "35" = 15,   # Below Average/Fringe
+  "40" = 20,   # Below Average/Fringe
+  "45" = 25,   # Fringe Average
+  "50" = 30,   # Average
+  "55" = 35,   # Above Average
+  "60" = 40,   # Plus
+  "65" = 42.5, # Plus/Plus Plus
+  "70" = 45,   # Plus Plus
+  "80" = 50    # Elite
+)
 
 # Define position adjustment factors
 position_factors <- list(
@@ -79,6 +94,27 @@ level_thresholds <- list(
   )
 )
 
+# Add position assignment function
+assign_position <- function(data, current_position, future_positions = NULL) {
+  # Assign current position
+  data <- data %>%
+    mutate(
+      Position = current_position,
+      Original_Position = Position  # Keep track of original position designation
+    )
+  
+  return(list(
+    current_data = data,
+    future_positions = future_positions
+  ))
+}
+
+
+# Function to convert 20-80 grade to score
+convert_grade_to_score <- function(grade) {
+  scouting_grades[[as.character(grade)]]
+}
+
 # Process batter data function
 process_batter_data <- function(data, level_avg_ages) {
   data %>%
@@ -124,21 +160,31 @@ check_threshold <- function(stat, threshold, lower_is_better = FALSE) {
   return(score)
 }
 
-# Calculate promotion score function
-calculate_promotion_score <- function(player_data, level_thresholds, position_factors) {
+# Calculate promotion score function with scouting grades
+calculate_promotion_score <- function(player_data, level_thresholds, position_factors, fielding_grade, baserunning_grade) {
   score <- 0
   current_level <- player_data$Level
   thresholds <- level_thresholds[[current_level]]
   pos_factor <- position_factors[[player_data$Position]]
   
-  if (is.null(pos_factor)) pos_factor <- 1  # Default factor if position not found
+  if (is.null(pos_factor)) pos_factor <- 1
   
   if (!is.null(thresholds)) {
-    score <- score + check_threshold(player_data$rolling_OPS, thresholds$OPS)
-    score <- score + check_threshold(player_data$rolling_wRC, thresholds$wRC)
-    score <- score + check_threshold(player_data$rolling_BB_pct, thresholds$BB_pct)
-    score <- score + check_threshold(player_data$rolling_K_pct, thresholds$K_pct, lower_is_better = TRUE)
-    score <- score + check_threshold(player_data$rolling_ISO, thresholds$ISO)
+    # Offensive metrics (60% of total score)
+    offense_score <- (
+      check_threshold(player_data$rolling_OPS, thresholds$OPS) +
+        check_threshold(player_data$rolling_wRC, thresholds$wRC) +
+        check_threshold(player_data$rolling_BB_pct, thresholds$BB_pct) +
+        check_threshold(player_data$rolling_K_pct, thresholds$K_pct, lower_is_better = TRUE) +
+        check_threshold(player_data$rolling_ISO, thresholds$ISO)
+    ) * 0.6
+    
+    # Convert scouting grades to scores
+    fielding_score <- convert_grade_to_score(fielding_grade) * 0.25
+    baserunning_score <- convert_grade_to_score(baserunning_grade) * 0.15
+    
+    # Combine scores
+    score <- offense_score + fielding_score + baserunning_score
     
     # Apply age and position adjustments
     age_factor <- 1 + (player_data$age_vs_level_avg * -0.05)
@@ -329,42 +375,192 @@ create_level_specific_plots <- function(promotion_scores) {
   return(level_plots)
 }
 
-# Main analysis function
-analyze_player <- function(data) {
-  # Process data
-  processed_data <- process_batter_data(data, level_avg_ages)
+# Modified analyze_player function to handle multiple position scenarios
+analyze_player <- function(data, 
+                           current_position,
+                           future_positions = NULL,
+                           fielding_grade = 50, 
+                           baserunning_grade = 50) {
   
-  # Calculate promotion scores
+  # Assign position(s)
+  position_data <- assign_position(data, current_position, future_positions)
+  
+  # Process data
+  processed_data <- process_batter_data(position_data$current_data, level_avg_ages)
+  
+  # Calculate promotion scores for current position
   promotion_scores <- processed_data %>%
     rowwise() %>%
-    mutate(promotion_score = calculate_promotion_score(cur_data(), level_thresholds, position_factors)) %>%
+    mutate(
+      promotion_score = calculate_promotion_score(
+        cur_data(), 
+        level_thresholds, 
+        position_factors, 
+        fielding_grade, 
+        baserunning_grade
+      )
+    ) %>%
     ungroup()
   
-  # Create overall visualization
-  overall_plot <- create_visualization(promotion_scores)
+  # Calculate alternative position scenarios if specified
+  future_scenarios <- NULL
+  if (!is.null(future_positions)) {
+    future_scenarios <- lapply(future_positions, function(pos) {
+      modified_data <- processed_data %>%
+        mutate(Position = pos)
+      
+      scores <- modified_data %>%
+        rowwise() %>%
+        mutate(
+          promotion_score = calculate_promotion_score(
+            cur_data(), 
+            level_thresholds, 
+            position_factors, 
+            fielding_grade, 
+            baserunning_grade
+          )
+        ) %>%
+        ungroup()
+      
+      list(
+        position = pos,
+        scores = scores,
+        plot = create_visualization(scores)
+      )
+    })
+    names(future_scenarios) <- future_positions
+  }
   
-  # Create level-specific plots
+  # Create visualizations
+  overall_plot <- create_visualization(promotion_scores)
   level_plots <- create_level_specific_plots(promotion_scores)
   
-  # Return results
-  list(
+  return(list(
     processed_data = processed_data,
     promotion_scores = promotion_scores,
     overall_plot = overall_plot,
-    level_plots = level_plots
-  )
+    level_plots = level_plots,
+    future_scenarios = future_scenarios,
+    scouting_grades = list(
+      fielding = fielding_grade,
+      baserunning = baserunning_grade
+    )
+  ))
 }
 
-# Run the analysis
-results <- analyze_player(Carson_McCusker_data)
+# Usage example:
+results <- analyze_player(
+  Carson_McCusker_data,
+  current_position = "RF",  # Assign current position as RF
+  future_positions = c("LF", "DH"),  # Evaluate future scenarios
+  fielding_grade = 40,
+  baserunning_grade = 40
+)
 
-# View plots
+# View current position results
 results$overall_plot
 
-# View level-specific plots
-for (level in names(results$level_plots)) {
-  print(results$level_plots[[level]])
+# View future position scenarios
+if (!is.null(results$future_scenarios)) {
+  for(pos in names(results$future_scenarios)) {
+    print(paste("Scenario:", pos))
+    print(results$future_scenarios[[pos]]$plot)
+  }
 }
 
-# View promotion scores data frame
-View(results$promotion_scores)
+# Create position comparison summary
+if (!is.null(results$future_scenarios)) {
+  position_comparison <- bind_rows(
+    mutate(results$promotion_scores, Position_Scenario = "Current (RF)"),
+    bind_rows(lapply(names(results$future_scenarios), function(pos) {
+      mutate(results$future_scenarios[[pos]]$scores, Position_Scenario = pos)
+    }))
+  ) %>%
+    group_by(Position_Scenario, Level) %>%
+    summarise(
+      Avg_Promotion_Score = round(mean(promotion_score, na.rm = TRUE), 2),
+      Max_Promotion_Score = round(max(promotion_score, na.rm = TRUE), 2),
+      Days_Above_Threshold = sum(promotion_score >= 65, na.rm = TRUE),
+      .groups = 'drop'
+    )
+  
+  # Print the detailed comparison table
+  print(position_comparison)
+  
+  # Inside your if statement, update the position plot creation:
+  position_plot <- plot_ly() %>%
+    # AA Average Scores
+    add_trace(
+      data = position_comparison %>% filter(Level == "AA"),
+      x = ~Position_Scenario,
+      y = ~Avg_Promotion_Score,
+      type = "bar",
+      name = "AA Average Score",
+      marker = list(color = '#2E86C1')  # Blue for AA
+    ) %>%
+    # AAA Average Scores
+    add_trace(
+      data = position_comparison %>% filter(Level == "AAA"),
+      x = ~Position_Scenario,
+      y = ~Avg_Promotion_Score,
+      type = "bar",
+      name = "AAA Average Score",
+      marker = list(color = '#28B463')  # Green for AAA
+    ) %>%
+    # AA Max Scores
+    add_trace(
+      data = position_comparison %>% filter(Level == "AA"),
+      x = ~Position_Scenario,
+      y = ~Max_Promotion_Score,
+      type = "scatter",
+      mode = "markers",
+      name = "AA Max Score",
+      marker = list(
+        color = '#1B4F72',  # Darker blue for AA
+        size = 10,
+        symbol = "circle"
+      )
+    ) %>%
+    # AAA Max Scores
+    add_trace(
+      data = position_comparison %>% filter(Level == "AAA"),
+      x = ~Position_Scenario,
+      y = ~Max_Promotion_Score,
+      type = "scatter",
+      mode = "markers",
+      name = "AAA Max Score",
+      marker = list(
+        color = '#186A3B',  # Darker green for AAA
+        size = 10,
+        symbol = "diamond"
+      )
+    ) %>%
+    layout(
+      title = "Promotion Scores by Position",
+      xaxis = list(
+        title = "Position",
+        tickfont = list(size = 12)
+      ),
+      yaxis = list(
+        title = "Score",
+        range = c(0, 100),
+        tickfont = list(size = 12),
+        gridcolor = 'rgba(0,0,0,0.1)'
+      ),
+      barmode = 'group',
+      showlegend = TRUE,
+      legend = list(
+        x = 1.05,
+        y = 1,
+        font = list(size = 12)
+      ),
+      margin = list(r = 150),  # Add right margin for legend
+      plot_bgcolor = 'white',
+      paper_bgcolor = 'white'
+    )
+  
+  # Print the position comparison plot
+  print(position_plot)
+  
+  # Print the position comparison plot
+  print(position_plot)
