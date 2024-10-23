@@ -153,36 +153,147 @@ calculate_promotion_score <- function(player_data, level_thresholds, position_fa
   return(min(score, 100))
 }
 
-# Create visualization function
+# Modified create_visualization function with more prominent threshold line
 create_visualization <- function(promotion_scores) {
-  # Add level transitions as vertical lines
+  # Create empty plotly object
+  p <- plot_ly()
+  
+  # Split data into level segments
+  level_segments <- split(promotion_scores, cumsum(c(1, diff(match(promotion_scores$Level, unique(promotion_scores$Level))) != 0)))
+  
+  # Distinct colors for levels
+  level_colors <- c(
+    "AA" = "#2E86C1",  # Strong blue
+    "AAA" = "#28B463"  # Strong green
+  )
+  
+  # First, add the promotion threshold with increased prominence
+  p <- p %>% add_segments(
+    x = min(promotion_scores$Date),
+    xend = max(promotion_scores$Date),
+    y = 65,
+    yend = 65,
+    line = list(
+      color = '#E74C3C',  # Solid red instead of rgba
+      dash = 'dash',
+      width = 2  # Increased from 1
+    ),
+    name = "Promotion Threshold",
+    showlegend = TRUE
+  )
+  
+  # Add promotion score lines with improved visibility
+  for(i in seq_along(level_segments)) {
+    segment <- level_segments[[i]]
+    level <- unique(segment$Level)
+    
+    p <- p %>% add_lines(
+      data = segment,
+      x = ~Date,
+      y = ~promotion_score,
+      name = paste("Promotion Score -", level),
+      line = list(
+        color = level_colors[level],
+        width = 3  # Thicker lines
+      ),
+      showlegend = TRUE
+    )
+  }
+  
+  # Add separate subplot for performance metrics
+  p <- p %>% layout(
+    yaxis2 = list(
+      side = "right",
+      overlaying = "y",
+      title = "OPS/wRC",
+      showgrid = FALSE,
+      range = c(0, max(c(promotion_scores$rolling_OPS, promotion_scores$rolling_wRC), na.rm = TRUE) * 1.1)
+    )
+  )
+  
+  # Add performance metrics with reduced opacity
+  p <- p %>%
+    add_lines(
+      data = promotion_scores,
+      x = ~Date,
+      y = ~rolling_OPS,
+      name = "Rolling OPS",
+      line = list(
+        color = 'rgba(142, 68, 173, 0.6)',  # Purple
+        dash = 'dot',
+        width = 2
+      ),
+      yaxis = "y2"
+    ) %>%
+    add_lines(
+      data = promotion_scores,
+      x = ~Date,
+      y = ~rolling_wRC,
+      name = "Rolling wRC",
+      line = list(
+        color = 'rgba(243, 156, 18, 0.6)',  # Orange
+        dash = 'dot',
+        width = 2
+      ),
+      yaxis = "y2"
+    )
+  
+  # Add level change indicators
   level_changes <- promotion_scores %>%
     mutate(level_change = Level != lag(Level)) %>%
     filter(level_change == TRUE)
   
-  p <- plot_ly(promotion_scores, x = ~Date) %>%
-    add_lines(y = ~promotion_score, name = "Promotion Score", 
-              color = ~Level, line = list(color = 'blue')) %>%
-    add_lines(y = ~rolling_OPS, name = "Rolling OPS", 
-              line = list(color = 'red'), yaxis = "y2") %>%
-    add_lines(y = ~rolling_wRC, name = "Rolling wRC", 
-              line = list(color = 'green'), yaxis = "y3")
-  
-  # Add vertical lines for level changes
   for(i in 1:nrow(level_changes)) {
-    p <- p %>% add_segments(x = level_changes$Date[i], xend = level_changes$Date[i],
-                            y = 0, yend = 100,
-                            line = list(color = 'black', dash = 'dash'),
-                            name = paste("Level Change:", level_changes$Level[i]))
+    p <- p %>% add_segments(
+      x = level_changes$Date[i],
+      xend = level_changes$Date[i],
+      y = 0,
+      yend = 100,
+      line = list(
+        color = 'rgba(0, 0, 0, 0.2)',  # Very light black
+        dash = 'dash',
+        width = 1
+      ),
+      showlegend = FALSE,
+      hoverinfo = "text",
+      text = paste("Level Change:", level_changes$Level[i])
+    )
   }
   
+  # Update layout with improved readability
   p <- p %>% layout(
-    title = "Promotion Readiness by Level",
-    xaxis = list(title = "Date"),
-    yaxis = list(title = "Promotion Score", range = c(0, 100), side = "left"),
-    yaxis2 = list(title = "OPS", overlaying = "y", side = "right"),
-    yaxis3 = list(title = "wRC", overlaying = "y", side = "right", position = 0.95),
-    showlegend = TRUE
+    title = list(
+      text = "Promotion Readiness by Level",
+      font = list(size = 24)
+    ),
+    xaxis = list(
+      title = "Date",
+      tickfont = list(size = 12),
+      gridcolor = 'rgba(0,0,0,0.1)',
+      showgrid = TRUE
+    ),
+    yaxis = list(
+      title = "Promotion Score",
+      range = c(0, 100),
+      side = "left",
+      tickfont = list(size = 12),
+      gridcolor = 'rgba(0,0,0,0.1)',
+      showgrid = TRUE
+    ),
+    showlegend = TRUE,
+    legend = list(
+      x = 1.05,
+      y = 1,
+      font = list(size = 12),
+      bgcolor = 'rgba(255,255,255,0.9)',
+      bordercolor = 'rgba(0,0,0,0.2)',
+      borderwidth = 1
+    ),
+    margin = list(r = 150, t = 100),  # Increased margins
+    plot_bgcolor = 'white',
+    paper_bgcolor = 'white',
+    width = 1000,  # Explicitly set width
+    height = 600   # Explicitly set height
   )
   
   return(p)
