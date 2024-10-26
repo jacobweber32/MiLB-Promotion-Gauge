@@ -1,0 +1,936 @@
+---
+title: "Minor League Player Promotion Analysis"
+author: "Jacob Weber"
+format: 
+  html:
+    toc: true
+    toc-depth: 3
+    toc-location: left
+    code-fold: true
+    code-tools: true
+    code-summary: "Show code"
+    theme: cosmo
+    fig-width: 12
+    fig-height: 8
+execute:
+  warning: false
+  message: false
+---
+
+## Overview {.unnumbered}
+
+This document analyzes minor league player promotion readiness using a comprehensive scoring system that considers:
+
+-   Performance metrics (OPS, wRC, BB%, K%, ISO)
+-   Scouting grades (fielding, baserunning)
+-   Age relative to level
+-   Position adjustments
+-   Hot/cold streaks
+
+```{r}
+## Setup and Configuration
+
+### Libraries and Dependencies
+#| code-fold: show
+
+library(tidyverse)
+library(lubridate)
+library(plotly)
+library(zoo)
+library(baseballr)
+library(purrr)
+```
+
+### System Definitions - Scouting Grades
+
+```{r}
+# Scouting grade structure
+scouting_grades <- list(
+  "20" = 0,    # Well Below Average
+  "30" = 10,   # Below Average
+  "35" = 15,   # Below Average/Fringe
+  "40" = 20,   # Below Average/Fringe
+  "45" = 25,   # Fringe Average
+  "50" = 30,   # Average
+  "55" = 35,   # Above Average
+  "60" = 40,   # Plus
+  "65" = 42.5, # Plus/Plus Plus
+  "70" = 45,   # Plus Plus
+  "80" = 50    # Elite
+)
+```
+
+### System Definitions - Position Factors
+
+```{r}
+# Position adjustment factors
+position_factors <- list(
+  "C" = 0.85,    # Catchers get a 15% reduction in offensive requirements
+  "SS" = 0.90,   # Premium defensive positions get slight reduction
+  "2B" = 0.90,
+  "CF" = 0.90,
+  "3B" = 0.95,
+  "RF" = 1.05,   # Corner outfield positions need more offense
+  "LF" = 1.05,
+  "1B" = 1.10,   # First base has highest offensive requirements
+  "DH" = 1.15    # DH needs to really hit to promote
+)
+```
+
+### System Definitions - Level Ages
+
+```{r}
+# Level average ages
+level_avg_ages <- c(
+  "DSL" = 17.70151306,
+  "Com" = 19.37089201,
+  "A" = 21.02167630,
+  "A+" = 21.81830743,
+  "AA" = 23.89126559,
+  "AAA" = 26.49371069
+)
+```
+
+### Level Thresholds
+
+```{r}
+# Level thresholds
+level_thresholds <- list(
+  "DSL" = list(
+    OPS = list(values = c(0.650, 0.700, 0.750, 0.800), scores = c(10, 15, 20, 25)),
+    wRC = list(values = c(0.6, 0.8, 1.0, 1.2), scores = c(10, 15, 20, 25)),
+    BB_pct = list(values = c(6, 8, 10, 12), scores = c(5, 10, 15, 20)),
+    K_pct = list(values = c(30, 27, 24, 21), scores = c(5, 10, 15, 20)),
+    ISO = list(values = c(0.100, 0.125, 0.150, 0.175), scores = c(5, 10, 15, 20)),
+    # New counting stat thresholds
+    hits = list(values = c(50, 75, 100, 125), scores = c(2, 4, 6, 8)),
+    total_bases = list(values = c(75, 125, 175, 225), scores = c(2, 4, 6, 8)),
+    extra_base_hits = list(values = c(15, 25, 35, 45), scores = c(2, 4, 6, 8)),
+    stolen_bases = list(values = c(5, 10, 15, 20), scores = c(2, 4, 6, 8)),
+    RBI = list(values = c(25, 50, 75, 100), scores = c(2, 4, 6, 8)),
+    Runs = list(values = c(25, 50, 75, 100), scores = c(2, 4, 6, 8))
+  ),
+  "Com" = list(
+    OPS = list(values = c(0.675, 0.725, 0.775, 0.825), scores = c(10, 15, 20, 25)),
+    wRC = list(values = c(0.7, 0.9, 1.1, 1.3), scores = c(10, 15, 20, 25)),
+    BB_pct = list(values = c(7, 9, 11, 13), scores = c(5, 10, 15, 20)),
+    K_pct = list(values = c(28, 25, 22, 19), scores = c(5, 10, 15, 20)),
+    ISO = list(values = c(0.120, 0.145, 0.170, 0.195), scores = c(5, 10, 15, 20)),
+    # New counting stat thresholds
+    hits = list(values = c(50, 75, 100, 125), scores = c(2, 4, 6, 8)),
+    total_bases = list(values = c(75, 125, 175, 225), scores = c(2, 4, 6, 8)),
+    extra_base_hits = list(values = c(15, 25, 35, 45), scores = c(2, 4, 6, 8)),
+    stolen_bases = list(values = c(5, 10, 15, 20), scores = c(2, 4, 6, 8)),
+    RBI = list(values = c(25, 50, 75, 100), scores = c(2, 4, 6, 8)),
+    Runs = list(values = c(25, 50, 75, 100), scores = c(2, 4, 6, 8))
+  ),
+  "A" = list(
+    OPS = list(values = c(0.700, 0.750, 0.800, 0.850), scores = c(10, 15, 20, 25)),
+    wRC = list(values = c(0.8, 1.0, 1.2, 1.4), scores = c(10, 15, 20, 25)),
+    BB_pct = list(values = c(7, 9, 11, 13), scores = c(5, 10, 15, 20)),
+    K_pct = list(values = c(27, 24, 21, 18), scores = c(5, 10, 15, 20)),
+    ISO = list(values = c(0.130, 0.155, 0.180, 0.205), scores = c(5, 10, 15, 20)),
+    # New counting stat thresholds
+    hits = list(values = c(50, 75, 100, 125), scores = c(2, 4, 6, 8)),
+    total_bases = list(values = c(75, 125, 175, 225), scores = c(2, 4, 6, 8)),
+    extra_base_hits = list(values = c(15, 25, 35, 45), scores = c(2, 4, 6, 8)),
+    stolen_bases = list(values = c(5, 10, 15, 20), scores = c(2, 4, 6, 8)),
+    RBI = list(values = c(25, 50, 75, 100), scores = c(2, 4, 6, 8)),
+    Runs = list(values = c(25, 50, 75, 100), scores = c(2, 4, 6, 8))
+  ),
+  "A+" = list(
+    OPS = list(values = c(0.725, 0.775, 0.825, 0.875), scores = c(10, 15, 20, 25)),
+    wRC = list(values = c(0.9, 1.1, 1.3, 1.5), scores = c(10, 15, 20, 25)),
+    BB_pct = list(values = c(8, 10, 12, 14), scores = c(5, 10, 15, 20)),
+    K_pct = list(values = c(26, 23, 20, 17), scores = c(5, 10, 15, 20)),
+    ISO = list(values = c(0.140, 0.165, 0.190, 0.215), scores = c(5, 10, 15, 20)),
+    # New counting stat thresholds
+    hits = list(values = c(50, 75, 100, 125), scores = c(2, 4, 6, 8)),
+    total_bases = list(values = c(75, 125, 175, 225), scores = c(2, 4, 6, 8)),
+    extra_base_hits = list(values = c(15, 25, 35, 45), scores = c(2, 4, 6, 8)),
+    stolen_bases = list(values = c(5, 10, 15, 20), scores = c(2, 4, 6, 8)),
+    RBI = list(values = c(25, 50, 75, 100), scores = c(2, 4, 6, 8)),
+    Runs = list(values = c(25, 50, 75, 100), scores = c(2, 4, 6, 8))
+  ),
+  "AA" = list(
+    OPS = list(values = c(0.750, 0.800, 0.850, 0.900), scores = c(10, 15, 20, 25)),
+    wRC = list(values = c(1.0, 1.2, 1.4, 1.6), scores = c(10, 15, 20, 25)),
+    BB_pct = list(values = c(8, 10, 12, 14), scores = c(5, 10, 15, 20)),
+    K_pct = list(values = c(25, 22, 19, 16), scores = c(5, 10, 15, 20)),
+    ISO = list(values = c(0.150, 0.175, 0.200, 0.225), scores = c(5, 10, 15, 20)),
+    # New counting stat thresholds
+    hits = list(values = c(50, 75, 100, 125), scores = c(2, 4, 6, 8)),
+    total_bases = list(values = c(75, 125, 175, 225), scores = c(2, 4, 6, 8)),
+    extra_base_hits = list(values = c(15, 25, 35, 45), scores = c(2, 4, 6, 8)),
+    stolen_bases = list(values = c(5, 10, 15, 20), scores = c(2, 4, 6, 8)),
+    RBI = list(values = c(25, 50, 75, 100), scores = c(2, 4, 6, 8)),
+    Runs = list(values = c(25, 50, 75, 100), scores = c(2, 4, 6, 8))
+  ),
+  "AAA" = list(
+    OPS = list(values = c(0.800, 0.850, 0.900, 0.950), scores = c(10, 15, 20, 25)),
+    wRC = list(values = c(1.1, 1.3, 1.5, 1.7), scores = c(10, 15, 20, 25)),
+    BB_pct = list(values = c(9, 11, 13, 15), scores = c(5, 10, 15, 20)),
+    K_pct = list(values = c(23, 20, 17, 14), scores = c(5, 10, 15, 20)),
+    ISO = list(values = c(0.175, 0.200, 0.225, 0.250), scores = c(5, 10, 15, 20)),
+    # New counting stat thresholds
+    hits = list(values = c(50, 75, 100, 125), scores = c(2, 4, 6, 8)),
+    total_bases = list(values = c(75, 125, 175, 225), scores = c(2, 4, 6, 8)),
+    extra_base_hits = list(values = c(15, 25, 35, 45), scores = c(2, 4, 6, 8)),
+    stolen_bases = list(values = c(5, 10, 15, 20), scores = c(2, 4, 6, 8)),
+    RBI = list(values = c(25, 50, 75, 100), scores = c(2, 4, 6, 8)),
+    Runs = list(values = c(25, 50, 75, 100), scores = c(2, 4, 6, 8))
+  )
+)
+```
+
+### Helper Functions
+
+### Data Collection Function
+
+```{r}
+get_player_data <- function(playerid, years) {
+  historical_data <- map_df(years, function(year) {
+    message(paste("Collecting data for", year))
+    data <- fg_milb_batter_game_logs(playerid = playerid, year = year) %>%
+      mutate(Season = year)
+    write.csv(data, 
+              file = paste0("C:/Users/weber/OneDrive/Desktop/Baseball/", 
+                           playerid, "_", year, ".csv"),
+              row.names = FALSE)
+    return(data)
+  })
+  return(historical_data)
+}
+```
+
+### Grade Conversion Function
+
+```{r}
+convert_grade_to_score <- function(grade) {
+  scouting_grades[[as.character(grade)]]
+}
+```
+
+### Position Assignment Function
+
+```{r}
+assign_position <- function(data, current_position, future_positions = NULL) {
+  data <- data %>%
+    mutate(
+      Position = current_position,
+      Original_Position = Position
+    )
+  return(list(
+    current_data = data,
+    future_positions = future_positions
+  ))
+}
+```
+
+### Threshold Check Function
+
+```{r}
+check_threshold <- function(stat, threshold, lower_is_better = FALSE) {
+  if (is.null(stat) || is.na(stat)) return(0)
+  
+  score <- 0
+  for (i in seq_along(threshold$values)) {
+    if (lower_is_better) {
+      if (stat <= threshold$values[i]) score <- threshold$scores[i]
+    } else {
+      if (stat >= threshold$values[i]) score <- threshold$scores[i]
+    }
+  }
+  return(score)
+}
+```
+
+## Data Processing Functions
+
+### Batter Data Processing
+
+```{r}
+process_batter_data <- function(data, level_avg_ages) {
+  data %>%
+    mutate(
+      Date = as.Date(Date),
+      Level = str_extract(Level, "\\(.*?\\)"),
+      Level = str_replace_all(Level, "[()]", ""),
+      # Calculate total bases for benchmark system
+      total_bases = (HR * 4) + (`3B` * 3) + (`2B` * 2) + `1B`
+    ) %>%
+    group_by(Season, Level) %>%
+    mutate(
+      # Games played for pace calculations
+      games_played = n(),
+      
+      # Cumulative stats that reset by level
+      cumulative_hits = cumsum(H),
+      cumulative_total_bases = cumsum(total_bases),
+      cumulative_xbh = cumsum(`2B` + `3B` + HR),
+      cumulative_sb = cumsum(SB),
+      cumulative_rbi = cumsum(RBI),
+      cumulative_runs = cumsum(R),
+      
+      # Pace calculations
+      hits_per_game = cumulative_hits / games_played,
+      tb_per_game = cumulative_total_bases / games_played,
+      counting_pace_bonus = case_when(
+        games_played < 50 & cumulative_hits >= 50 ~ 1.2,
+        games_played < 75 & cumulative_hits >= 75 ~ 1.15,
+        games_played < 100 & cumulative_hits >= 100 ~ 1.1,
+        TRUE ~ 1.0
+      ),
+      
+      # Short-term performance (30% weight)
+      rolling_14_OPS = rollapply(OPS, width = 14, FUN = mean, align = "right", fill = "extend", partial = TRUE),
+      rolling_14_wRC = rollapply(wRC, width = 14, FUN = mean, align = "right", fill = "extend", partial = TRUE),
+      rolling_14_BB_pct = rollapply(`BB%`, width = 14, FUN = mean, align = "right", fill = "extend", partial = TRUE),
+      rolling_14_K_pct = rollapply(`K%`, width = 14, FUN = mean, align = "right", fill = "extend", partial = TRUE),
+      rolling_14_ISO = rollapply(ISO, width = 14, FUN = mean, align = "right", fill = "extend", partial = TRUE),
+      
+      # Season-to-date stats (50% weight)
+      season_OPS = cummean(OPS),
+      season_wRC = cummean(wRC),
+      season_BB_pct = cummean(`BB%`),
+      season_K_pct = cummean(`K%`),
+      season_ISO = cummean(ISO),
+      
+      # Last 30 games (20% weight)
+      rolling_30_OPS = rollapply(OPS, width = 30, FUN = mean, align = "right", fill = "extend", partial = TRUE),
+      rolling_30_wRC = rollapply(wRC, width = 30, FUN = mean, align = "right", fill = "extend", partial = TRUE),
+      rolling_30_BB_pct = rollapply(`BB%`, width = 30, FUN = mean, align = "right", fill = "extend", partial = TRUE),
+      rolling_30_K_pct = rollapply(`K%`, width = 30, FUN = mean, align = "right", fill = "extend", partial = TRUE),
+      rolling_30_ISO = rollapply(ISO, width = 30, FUN = mean, align = "right", fill = "extend", partial = TRUE),
+      
+      # Combined metrics with weighted components
+      rolling_OPS = (rolling_14_OPS * 0.3) + (season_OPS * 0.5) + (rolling_30_OPS * 0.2),
+      rolling_wRC = (rolling_14_wRC * 0.3) + (season_wRC * 0.5) + (rolling_30_wRC * 0.2),
+      rolling_BB_pct = (rolling_14_BB_pct * 0.3) + (season_BB_pct * 0.5) + (rolling_30_BB_pct * 0.2),
+      rolling_K_pct = (rolling_14_K_pct * 0.3) + (season_K_pct * 0.5) + (rolling_30_K_pct * 0.2),
+      rolling_ISO = (rolling_14_ISO * 0.3) + (season_ISO * 0.5) + (rolling_30_ISO * 0.2),
+      
+      # Additional context
+      games_at_level = n(),
+      plate_appearances = cumsum(PA),
+      
+      # Age context
+      age_vs_level_avg = as.numeric(AgeYears) - level_avg_ages[Level],
+      
+      # Streak detection using more balanced metrics
+      rolling_OPS_zscore = (rolling_OPS - mean(rolling_OPS, na.rm = TRUE)) / sd(rolling_OPS, na.rm = TRUE),
+      hot_streak = rolling_OPS_zscore > 1 & rolling_14_OPS > season_OPS,
+      slump = rolling_OPS_zscore < -1 & rolling_14_OPS < season_OPS
+    ) %>%
+    ungroup()
+}
+
+```
+
+### Promotion Score Calculation
+
+```{r}
+calculate_promotion_score <- function(player_data, level_thresholds, position_factors, fielding_grade, baserunning_grade) {
+  score <- 0
+  current_level <- player_data$Level
+  thresholds <- level_thresholds[[current_level]]
+  pos_factor <- position_factors[[player_data$Position]]
+  
+  if (is.null(pos_factor)) pos_factor <- 1
+  
+  if (!is.null(thresholds)) {
+    # Rate stats (60% of total score)
+    offense_score <- (
+      check_threshold(player_data$rolling_OPS, thresholds$OPS) +
+        check_threshold(player_data$rolling_wRC, thresholds$wRC) +
+        check_threshold(player_data$rolling_BB_pct, thresholds$BB_pct) +
+        check_threshold(player_data$rolling_K_pct, thresholds$K_pct, lower_is_better = TRUE) +
+        check_threshold(player_data$rolling_ISO, thresholds$ISO)
+    ) * 0.6
+    
+    # Convert scouting grades to scores
+    fielding_score <- convert_grade_to_score(fielding_grade) * 0.25
+    baserunning_score <- convert_grade_to_score(baserunning_grade) * 0.15
+    
+    # Combine base scores
+    score <- offense_score + fielding_score + baserunning_score
+    
+    # Apply age and position adjustments
+    age_factor <- 1 + (player_data$age_vs_level_avg * -0.05)
+    age_factor <- max(min(age_factor, 1.2), 0.8)
+    score <- score * age_factor * pos_factor
+    
+    # Apply streak adjustments
+    if (isTRUE(player_data$hot_streak)) score <- score * 1.1
+    if (isTRUE(player_data$slump)) score <- score * 0.9
+    
+    # Apply counting stat bonuses
+    counting_bonus <- 1.0  # Start with no bonus
+    if(player_data$cumulative_hits >= 100) counting_bonus <- counting_bonus + 0.05
+    if(player_data$cumulative_total_bases >= 175) counting_bonus <- counting_bonus + 0.05
+    if(player_data$cumulative_xbh >= 35) counting_bonus <- counting_bonus + 0.05
+    
+    score <- score * counting_bonus
+  }
+  
+  return(min(score, 100))
+}
+```
+
+## Visualization Functions
+
+### Main Visualization Function
+
+```{r}
+create_visualization <- function(promotion_scores, player_name) {
+  # Create empty plotly object
+  p <- plot_ly()
+  
+  # Split data into level segments
+  level_segments <- split(promotion_scores, cumsum(c(1, diff(match(promotion_scores$Level, unique(promotion_scores$Level))) != 0)))
+  
+  # Color scheme for different levels
+  level_colors <- c(
+    "A" = "#FFA07A",    # Light salmon
+    "A+" = "#FF7F50",   # Coral
+    "AA" = "#2E86C1",   # Strong blue
+    "AAA" = "#28B463"   # Strong green
+  )
+  
+  # Add promotion threshold with increased prominence
+  p <- p %>% add_segments(
+    x = min(promotion_scores$Date),
+    xend = max(promotion_scores$Date),
+    y = 65,
+    yend = 65,
+    line = list(
+      color = '#E74C3C',  # Solid red
+      dash = 'dash',
+      width = 2
+    ),
+    name = "Promotion Threshold",
+    showlegend = TRUE
+  )
+  
+  # Add promotion score lines for each level
+  for(i in seq_along(level_segments)) {
+    segment <- level_segments[[i]]
+    level <- unique(segment$Level)
+    
+    p <- p %>% add_lines(
+      data = segment,
+      x = ~Date,
+      y = ~promotion_score,
+      name = paste("Promotion Score -", level),
+      line = list(
+        color = level_colors[level],
+        width = 3
+      ),
+      showlegend = TRUE
+    )
+  }
+  
+  # Add performance metrics
+  p <- p %>%
+    add_lines(
+      data = promotion_scores,
+      x = ~Date,
+      y = ~rolling_OPS,
+      name = "Rolling OPS",
+      line = list(color = 'rgba(142, 68, 173, 0.6)', dash = 'dot', width = 2),
+      yaxis = "y2"
+    ) %>%
+    add_lines(
+      data = promotion_scores,
+      x = ~Date,
+      y = ~rolling_wRC,
+      name = "Rolling wRC",
+      line = list(color = 'rgba(243, 156, 18, 0.6)', dash = 'dot', width = 2),
+      yaxis = "y2"
+    )
+  
+  # Add level change indicators
+  level_changes <- promotion_scores %>%
+    mutate(level_change = Level != lag(Level)) %>%
+    filter(level_change == TRUE)
+  
+  if(nrow(level_changes) > 0) {
+    for(i in 1:nrow(level_changes)) {
+      p <- p %>% add_segments(
+        x = level_changes$Date[i],
+        xend = level_changes$Date[i],
+        y = 0,
+        yend = 100,
+        line = list(color = 'rgba(0,0,0,0.2)', dash = 'dash', width = 1),
+        showlegend = FALSE,
+        hoverinfo = "text",
+        text = paste("Level Change:", level_changes$Level[i])
+      )
+    }
+  }
+  
+  # Update layout with player name
+  p <- p %>% layout(
+    title = list(
+      text = paste(player_name, "- Promotion Readiness by Level"),
+      font = list(size = 24)
+    ),
+    xaxis = list(
+      title = "Date",
+      tickfont = list(size = 12),
+      gridcolor = 'rgba(0,0,0,0.1)',
+      showgrid = TRUE
+    ),
+    yaxis = list(
+      title = "Promotion Score",
+      range = c(0, 100),
+      side = "left",
+      tickfont = list(size = 12),
+      gridcolor = 'rgba(0,0,0,0.1)',
+      showgrid = TRUE
+    ),
+    yaxis2 = list(
+      title = "OPS/wRC",
+      overlaying = "y",
+      side = "right",
+      showgrid = FALSE,
+      range = c(0, max(c(promotion_scores$rolling_OPS, 
+                         promotion_scores$rolling_wRC), na.rm = TRUE) * 1.1)
+    ),
+    showlegend = TRUE,
+    legend = list(
+      x = 1.05,
+      y = 1,
+      font = list(size = 12),
+      bgcolor = 'rgba(255,255,255,0.9)',
+      bordercolor = 'rgba(0,0,0,0.2)',
+      borderwidth = 1
+    ),
+    margin = list(r = 150, t = 100),
+    plot_bgcolor = 'white',
+    paper_bgcolor = 'white',
+    width = 1000,
+    height = 600
+  )
+  
+  return(p)
+}
+```
+
+### Position Comparison Visualization
+
+```{r}
+create_position_plot <- function(position_comparison, player_name) {
+  plot_ly() %>%
+    # A/A+ Average Scores
+    add_trace(
+      data = position_comparison %>% filter(Level %in% c("A", "A+")),
+      x = ~Position_Scenario,
+      y = ~Avg_Promotion_Score,
+      type = "bar",
+      name = ~paste(Level, "Average Score"),
+      marker = list(color = c('#FFA07A', '#FF7F50'))  # Salmon colors for A-ball
+    ) %>%
+    # AA Average Scores
+    add_trace(
+      data = position_comparison %>% filter(Level == "AA"),
+      x = ~Position_Scenario,
+      y = ~Avg_Promotion_Score,
+      type = "bar",
+      name = "AA Average Score",
+      marker = list(color = '#2E86C1')
+    ) %>%
+    # AAA Average Scores
+    add_trace(
+      data = position_comparison %>% filter(Level == "AAA"),
+      x = ~Position_Scenario,
+      y = ~Avg_Promotion_Score,
+      type = "bar",
+      name = "AAA Average Score",
+      marker = list(color = '#28B463')
+    ) %>%
+    # Max Scores for each level
+    add_trace(
+      data = position_comparison,
+      x = ~Position_Scenario,
+      y = ~Max_Promotion_Score,
+      type = "scatter",
+      mode = "markers",
+      name = ~paste(Level, "Peak Score"),
+      marker = list(
+        size = 10,
+        color = ~case_when(
+          Level == "A" ~ '#CD5C5C',
+          Level == "A+" ~ '#CD853F',
+          Level == "AA" ~ '#1B4F72',
+          Level == "AAA" ~ '#186A3B'
+        ),
+        symbol = ~case_when(
+          Level == "A" ~ "circle",
+          Level == "A+" ~ "square",
+          Level == "AA" ~ "diamond",
+          Level == "AAA" ~ "star"
+        )
+      )
+    ) %>%
+    layout(
+      title = paste(player_name, "- Position Comparison Analysis"),
+      xaxis = list(
+        title = "Position",
+        tickfont = list(size = 12)
+      ),
+      yaxis = list(
+        title = "Score",
+        range = c(0, 100),
+        tickfont = list(size = 12),
+        gridcolor = 'rgba(0,0,0,0.1)'
+      ),
+      barmode = 'group',
+      showlegend = TRUE,
+      legend = list(
+        x = 1.05,
+        y = 1,
+        font = list(size = 12)
+      ),
+      margin = list(r = 150),
+      plot_bgcolor = 'white',
+      paper_bgcolor = 'white',
+      width = 1000,
+      height = 600
+    )
+}
+
+```
+
+## Main Analysis Function
+
+### Player Analysis Function
+
+```{r}
+analyze_player <- function(data, 
+                         current_position,
+                         future_positions = NULL,
+                         fielding_grade = 50,
+                         baserunning_grade = 50,
+                         player_name = "Player") {
+  
+  # Assign position(s)
+  position_data <- assign_position(data, current_position, future_positions)
+  
+  # Process data
+  processed_data <- process_batter_data(position_data$current_data, level_avg_ages)
+  
+  # Calculate promotion scores for current position
+  promotion_scores <- processed_data %>%
+    rowwise() %>%
+    mutate(
+      promotion_score = calculate_promotion_score(
+        cur_data(),
+        level_thresholds,
+        position_factors,
+        fielding_grade,
+        baserunning_grade
+      )
+    ) %>%
+    ungroup()
+  
+  # Calculate alternative position scenarios
+  future_scenarios <- NULL
+  if (!is.null(future_positions)) {
+    future_scenarios <- lapply(future_positions, function(pos) {
+      modified_data <- processed_data %>%
+        mutate(Position = pos)
+      
+      scores <- modified_data %>%
+        rowwise() %>%
+        mutate(
+          promotion_score = calculate_promotion_score(
+            cur_data(),
+            level_thresholds,
+            position_factors,
+            fielding_grade,
+            baserunning_grade
+          )
+        ) %>%
+        ungroup()
+      
+      list(
+        position = pos,
+        scores = scores,
+        plot = create_visualization(scores, paste(player_name, "-", pos))
+      )
+    })
+    names(future_scenarios) <- future_positions
+  }
+  
+  # Create main visualizations
+  overall_plot <- create_visualization(promotion_scores, player_name)
+  
+  # Create position comparison data
+  position_comparison <- NULL
+  if (!is.null(future_scenarios)) {
+    position_comparison <- bind_rows(
+      mutate(promotion_scores, Position_Scenario = paste0("Current (", current_position, ")")),
+      bind_rows(lapply(names(future_scenarios), function(pos) {
+        mutate(future_scenarios[[pos]]$scores, Position_Scenario = pos)
+      }))
+    ) %>%
+      group_by(Position_Scenario, Level) %>%
+      summarise(
+        Avg_Promotion_Score = round(mean(promotion_score, na.rm = TRUE), 2),
+        Max_Promotion_Score = round(max(promotion_score, na.rm = TRUE), 2),
+        Days_Above_Threshold = sum(promotion_score >= 65, na.rm = TRUE),
+        .groups = 'drop'
+      )
+  }
+  
+  return(list(
+    processed_data = processed_data,
+    promotion_scores = promotion_scores,
+    overall_plot = overall_plot,
+    future_scenarios = future_scenarios,
+    position_comparison = position_comparison,
+    position_plot = if(!is.null(position_comparison)) create_position_plot(position_comparison, player_name) else NULL,
+    scouting_grades = list(
+      fielding = fielding_grade,
+      baserunning = baserunning_grade
+    )
+  ))
+}
+```
+
+## Results Analysis Functions
+
+### Player Analysis Display Function
+
+```{r}
+view_player_analysis <- function(results, player_name) {
+  # Print player name and current analysis
+  cat(paste("\n=== Analysis for", player_name, "===\n"))
+  
+  # View overall timeline
+  cat("\nOverall Performance Timeline:\n")
+  results$overall_plot
+  
+  # View position comparison if available
+  if (!is.null(results$position_comparison)) {
+    cat("\nPosition Comparison Summary:\n")
+    print(results$position_comparison)
+    
+    # View position comparison plot
+    cat("\nPosition Comparison Plot:\n")
+    results$position_plot
+  }
+  
+  # View scenario plots if available
+  if (!is.null(results$future_scenarios)) {
+    cat("\nFuture Position Scenarios:\n")
+    for(pos in names(results$future_scenarios)) {
+      cat(paste("\nScenario:", pos, "\n"))
+      results$future_scenarios[[pos]]$plot
+    }
+  }
+  
+  # Create summary statistics
+  summary_stats <- results$promotion_scores %>%
+    group_by(Level) %>%
+    summarise(
+      Games_Played = n(),
+      Avg_Score = mean(promotion_score, na.rm = TRUE),
+      Peak_Score = max(promotion_score, na.rm = TRUE),
+      Days_Above_Threshold = sum(promotion_score >= 65, na.rm = TRUE),
+      Avg_OPS = mean(rolling_OPS, na.rm = TRUE),
+      Avg_wRC = mean(rolling_wRC, na.rm = TRUE)
+    )
+  
+  cat("\nPerformance Summary by Level:\n")
+  print(summary_stats)
+}
+```
+
+### Export Function
+
+```{r}
+export_results <- function(results, player_name) {
+  # Create directory if it doesn't exist
+  dir.create("analysis_results", showWarnings = FALSE)
+  
+  # Export position comparison
+  if (!is.null(results$position_comparison)) {
+    write.csv(
+      results$position_comparison,
+      file = paste0("analysis_results/", player_name, "_position_comparison.csv"),
+      row.names = FALSE
+    )
+  }
+  
+  # Export processed data
+  write.csv(
+    results$processed_data,
+    file = paste0("analysis_results/", player_name, "_processed_data.csv"),
+    row.names = FALSE
+  )
+  
+  # Export promotion scores
+  write.csv(
+    results$promotion_scores,
+    file = paste0("analysis_results/", player_name, "_promotion_scores.csv"),
+    row.names = FALSE
+  )
+}
+```
+
+### Additional Analysis Functions
+
+```{r}
+analyze_age_impact <- function(results) {
+  results$promotion_scores %>%
+    group_by(Level) %>%
+    summarise(
+      Age_vs_Level = mean(age_vs_level_avg, na.rm = TRUE),
+      Avg_Score_Impact = mean(promotion_score * (1 + (age_vs_level_avg * -0.05)), na.rm = TRUE) -
+                        mean(promotion_score, na.rm = TRUE)
+    )
+}
+
+analyze_position_impact <- function(results) {
+  if (!is.null(results$position_comparison)) {
+    results$position_comparison %>%
+      group_by(Position_Scenario) %>%
+      summarise(
+        Score_Difference = Avg_Promotion_Score - 
+          first(Avg_Promotion_Score[Position_Scenario == grep("Current", Position_Scenario, value = TRUE)])
+      )
+  }
+}
+```
+
+## Player Analysis Implementation
+
+### McCusker Analysis
+
+```{r}
+#| output: true
+
+# Collect McCusker data
+mccusker_data <- get_player_data(playerid = "sa3022304", years = c(2024, 2023, 2022))
+
+# Analyze McCusker
+mccusker_results <- analyze_player(
+  data = mccusker_data,
+  current_position = "RF",
+  future_positions = c("LF", "DH"),
+  fielding_grade = 40,
+  baserunning_grade = 40,
+  player_name = "Carson McCusker"
+)
+
+# View McCusker results
+view_player_analysis(mccusker_results, "Carson McCusker")
+
+# Export McCusker results
+export_results(mccusker_results, "McCusker")
+```
+
+### Areinamo Analysis
+
+```{r}
+#| output: true
+
+# Collect Areinamo data
+areinamo_data <- get_player_data(playerid = "sa3015802", years = c(2024, 2023, 2022))
+
+# Analyze Areinamo
+areinamo_results <- analyze_player(
+  data = areinamo_data,
+  current_position = "2B",
+  future_positions = c("SS", "3B"),
+  fielding_grade = 55,
+  baserunning_grade = 40,
+  player_name = "Jadher Areinamo"
+)
+
+# View Areinamo results
+view_player_analysis(areinamo_results, "Jadher Areinamo")
+
+# Export Areinamo results
+export_results(areinamo_results, "Areinamo")
+```
+
+### Additional Analysis Results
+
+```{r}
+#| output: true
+
+# Age Impact Analysis
+cat("\nAge Impact Analysis for McCusker:\n")
+print(analyze_age_impact(mccusker_results))
+
+cat("\nAge Impact Analysis for Areinamo:\n")
+print(analyze_age_impact(areinamo_results))
+
+# Position Impact Analysis
+cat("\nPosition Impact Analysis for McCusker:\n")
+print(analyze_position_impact(mccusker_results))
+
+cat("\nPosition Impact Analysis for Areinamo:\n")
+print(analyze_position_impact(areinamo_results))
+```
+
+```{r}
+#| output: true
+#| fig.width: 12
+#| fig.height: 8
+
+# Display McCusker's overall timeline
+mccusker_results$overall_plot
+```
+
+```{r}
+#| output: true
+#| fig.width: 12
+#| fig.height: 8
+
+# Display McCusker's position comparison plot
+mccusker_results$position_plot
+```
+
+```{r}
+#| output: true
+#| fig.width: 12
+#| fig.height: 8
+
+# Display McCusker's future position scenarios
+for(pos in names(mccusker_results$future_scenarios)) {
+  print(mccusker_results$future_scenarios[[pos]]$plot)
+}
+```
+
+```{r}
+#| output: true
+#| fig.width: 12
+#| fig.height: 8
+
+# Display Areinamo's overall timeline
+areinamo_results$overall_plot
+```
+
+```{r}
+#| output: true
+#| fig.width: 12
+#| fig.height: 8
+
+# Display Areinamo's position comparison plot
+areinamo_results$position_plot
+```
+
+```{r}
+#| output: true
+#| fig.width: 12
+#| fig.height: 8
+
+# Display Areinamo's future position scenarios
+for(pos in names(areinamo_results$future_scenarios)) {
+  print(areinamo_results$future_scenarios[[pos]]$plot)
+}
+```
