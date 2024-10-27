@@ -8,4 +8,4 @@ Additionally, I added a way to display how ready a player would be if they chang
 
 10/25 - Added functionality over multiple seasons
 
-10/26 - Added "bonus point" system for counting stat benchmarks at each level and updated graphs
+10/26 - Added "bonus point" system for counting stat benchmarks at each level as well as an additional pace bonus
